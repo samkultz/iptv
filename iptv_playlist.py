@@ -10,13 +10,12 @@ from urllib.request import Request, urlopen
 
 
 BLOCKED_ADULT_DOMAINS = ("kaamdesi.com",)
-PORN_LABEL = re.compile(
-    r"porn|xxx|erotic|erotik|erotico|playboy|hustler|brazzers|penthouse|"
-    r"dorcel|red\W*light|private\W*tv|sex\W*prive|sex\W*treme|"
-    r"sexy?\W*hot|\badult(?:s|o|os)?\b(?!\W*swim\b)"
-)
 CHANNEL_ATTRIBUTE = re.compile(
     r'''\b([\w-]+)\s*=\s*(["'])(.*?)\2''',
+    re.IGNORECASE,
+)
+GROUP_TITLE_ATTRIBUTE = re.compile(
+    r'''(\bgroup-title\s*=\s*)(["'])(.*?)\2''',
     re.IGNORECASE,
 )
 HEADER_NAMES = {
@@ -26,6 +25,11 @@ HEADER_NAMES = {
     "referer": "Referer",
     "origin": "Origin",
 }
+PORN_LABEL = re.compile(
+    r"porn|xxx|erotic|erotik|erotico|playboy|hustler|brazzers|penthouse|"
+    r"dorcel|red\W*light|private\W*tv|sex\W*prive|sex\W*treme|"
+    r"sexy?\W*hot|\badult(?:s|o|os)?\b(?!\W*swim\b)"
+)
 
 
 def decode_playlist(content):
@@ -54,6 +58,29 @@ def entry_attributes(entry):
         match.group(1).casefold(): html.unescape(match.group(3))
         for match in CHANNEL_ATTRIBUTE.finditer(entry[0])
     }
+
+
+def set_group_title(entry, group):
+    updated = list(entry)
+    line = updated[0]
+    safe_group = html.escape(" ".join(group.split()), quote=True)
+    match = GROUP_TITLE_ATTRIBUTE.search(line)
+    if match:
+        line = line[:match.start(3)] + safe_group + line[match.end(3):]
+    else:
+        quote_char = None
+        comma = None
+        for index, character in enumerate(line):
+            if character in ("\"", "'"):
+                quote_char = None if quote_char == character else character if quote_char is None else quote_char
+            elif character == "," and quote_char is None:
+                comma = index
+                break
+        if comma is None:
+            return updated
+        line = line[:comma] + f' group-title="{safe_group}"' + line[comma:]
+    updated[0] = line
+    return updated
 
 
 def normalized_text(value):

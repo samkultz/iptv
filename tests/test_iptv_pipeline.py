@@ -48,11 +48,61 @@ class PlaylistTests(unittest.TestCase):
             "whitelist_countries": ["br"],
             "blacklist_countries": [],
             "exclude_adult": True,
+            "exclude_unmapped_non_latin": True,
+            "group_script_channels": True,
+            "group_unmapped_scripts": True,
+            "language_character_groups": filtered.DEFAULT_RULES["language_character_groups"],
+            "script_country_groups": filtered.DEFAULT_RULES["script_country_groups"],
         }
         result = filtered.filter_playlist(SAMPLE_PLAYLIST, rules).decode()
         self.assertIn("News Brasil", result)
         self.assertNotIn("News US", result)
         self.assertNotIn("Miami TV", result)
+
+    def test_language_scripts_assign_country_groups(self):
+        content = (
+            "#EXTM3U\n"
+            "#EXTINF:-1,中央电视台\nhttps://example.test/cn\n"
+            "#EXTINF:-1,ニュース日本\nhttps://example.test/jp\n"
+            "#EXTINF:-1,한국 뉴스\nhttps://example.test/kr\n"
+            "#EXTINF:-1,Հայաստանի լուրեր\nhttps://example.test/am\n"
+            "#EXTINF:-1,ქართული ამბები\nhttps://example.test/ge\n"
+            "#EXTINF:-1,ຂ່າວລາວ\nhttps://example.test/la\n"
+            "#EXTINF:-1,Новости\nhttps://example.test/ru\n"
+            "#EXTINF:-1,قناة الأخبار\nhttps://example.test/ar\n"
+            "#EXTINF:-1,समाचार\nhttps://example.test/hi\n"
+        )
+        rules = filtered.load_rules(filtered.DEFAULT_FILTERS)
+        result = filtered.filter_playlist(content, rules).decode()
+        self.assertIn('group-title="China"', result)
+        self.assertIn('group-title="Japan"', result)
+        self.assertIn('group-title="South Korea"', result)
+        self.assertIn('group-title="Armenia"', result)
+        self.assertIn('group-title="Georgia"', result)
+        self.assertIn('group-title="Laos"', result)
+        self.assertIn('group-title="Cyrillic"', result)
+        self.assertIn('group-title="Arabic"', result)
+        self.assertIn('group-title="Devanagari"', result)
+        self.assertNotIn("Новости", filtered.filter_playlist(
+            content,
+            rules | {"exclude_unmapped_non_latin": True},
+        ).decode())
+
+    def test_language_characters_assign_presumed_groups(self):
+        content = (
+            "#EXTM3U\n"
+            "#EXTINF:-1,Señal de España\nhttps://example.test/es\n"
+            "#EXTINF:-1,¿Qué tal?\nhttps://example.test/es2\n"
+            "#EXTINF:-1,Þáttur í dag\nhttps://example.test/is\n"
+            "#EXTINF:-1,ðæö\nhttps://example.test/is2\n"
+            "#EXTINF:-1,Nachrichten aus Berlin\nhttps://example.test/de\n"
+        )
+        rules = filtered.load_rules(filtered.DEFAULT_FILTERS)
+        result = filtered.filter_playlist(content, rules).decode()
+        self.assertEqual(result.count('group-title="spanish_presumed"'), 2)
+        self.assertEqual(result.count('group-title="islandic_presumed"'), 2)
+        self.assertIn("Nachrichten aus Berlin", result)
+        self.assertNotIn("group-title=\"spanish_presumed\"", result.split("Nachrichten aus Berlin")[0].split("#EXTINF")[-1])
 
     def test_discovery_appends_and_validation_builds_working_list(self):
         clean_source = iptv_playlist.filter_porn_entries(SAMPLE_PLAYLIST.encode())

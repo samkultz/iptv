@@ -51,11 +51,17 @@ python runprogram.py --check-streams --playlist output/allFound.m3u --check-offs
 
 Edite `filters.json` para configurar `whitelist_terms`, `blacklist_terms`, `whitelist_countries`, `blacklist_countries` e `exclude_adult`. As opções de whitelist são inclusivas: se houver termos ou países permitidos, o canal precisa corresponder. Os países são lidos dos atributos `tvg-country`, `country`, `country-code` ou `tvg-country-code` da entrada M3U.
 
+Por padrão, scripts com país mapeado recebem esse país como `group-title`: Han → China, Hiragana/Katakana → Japan, Hangul → South Korea, Thai → Thailand, Armenian → Armenia, Georgian → Georgia, Greek → Greece, Hebrew → Israel, Khmer → Cambodia, Lao → Laos, Myanmar → Myanmar e Sinhala → Sri Lanka. Kana tem prioridade sobre Han para não classificar títulos japoneses como chineses. Esses mapeamentos são heurísticos: Han também é usado fora da China, e grego/hebraico não identificam exclusivamente um país.
+
+Outras escritas são mantidas e agrupadas pelo nome do script, sem inventar um país: por exemplo, árabe → `Arabic`, cirílico → `Cyrillic`, devanágari → `Devanagari`. Letras específicas também podem sugerir um idioma: `ñ/¿/¡` → `spanish_presumed`; `þ/ð/æ` → `islandic_presumed`. São indícios, não detecção certa: `ñ` aparece em outros idiomas e `ð/æ` também podem ocorrer em feroês. Os caracteres e grupos são configuráveis por `language_character_groups` em `filters.json`. Para excluir scripts não latinos sem país mapeado, defina `exclude_unmapped_non_latin` como `true` no JSON ou use `--exclude-unmapped-non-latin`. `--include-unmapped-non-latin` mantém esses scripts mesmo se o JSON pedir para excluí-los. Defina `group_script_channels` como `false` para não alterar `group-title`.
+
 Também é possível adicionar regras pela linha de comando:
 
 ```bash
 python runprogram_filtered.py --whitelist-country BR --whitelist-term news --blacklist-term shopping
 ```
+
+`--include-unmapped-non-latin` mantém scripts sem grupo configurado apenas nessa execução.
 
 Consulte `python runprogram_filtered.py --help` para as opções de entrada, saída, host e porta.
 

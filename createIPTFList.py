@@ -25,7 +25,7 @@ DEFAULT_ALL_FOUND = ROOT / "output" / "allFound.m3u"
 DEFAULT_WORKING = ROOT / "output" / "working.m3u"
 GITHUB_API = "https://api.github.com"
 DEFAULT_QUERIES = ("iptv m3u in:readme", "iptv playlist in:readme")
-MAX_PLAYLIST_BYTES = 5 * 1024 * 1024
+MAX_PLAYLIST_BYTES = 2 * 1024 * 1024
 
 
 class GitHubAPIError(RuntimeError):

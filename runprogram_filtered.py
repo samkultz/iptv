@@ -8,9 +8,10 @@ import tempfile
 import unicodedata
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import cast
 from urllib.parse import urlsplit
 
-from iptv_playlist import entry_attributes, is_adult_entry, parse_entries, render_playlist
+from iptv_playlist import entry_attributes, is_adult_entry, parse_entries, render_playlist, set_group_title
 
 
 ROOT = Path(__file__).resolve().parent
@@ -23,6 +24,28 @@ DEFAULT_RULES = {
     "whitelist_countries": [],
     "blacklist_countries": [],
     "exclude_adult": True,
+    "exclude_unmapped_non_latin": False,
+    "group_script_channels": True,
+    "group_unmapped_scripts": True,
+    "language_character_groups": {
+        "spanish_presumed": ["ñ", "¿", "¡"],
+        "islandic_presumed": ["þ", "ð", "æ"],
+    },
+    "script_country_groups": {
+        "HAN": "China",
+        "HIRAGANA": "Japan",
+        "KATAKANA": "Japan",
+        "HANGUL": "South Korea",
+        "THAI": "Thailand",
+        "ARMENIAN": "Armenia",
+        "GEORGIAN": "Georgia",
+        "GREEK": "Greece",
+        "HEBREW": "Israel",
+        "KHMER": "Cambodia",
+        "LAO": "Laos",
+        "MYANMAR": "Myanmar",
+        "SINHALA": "Sri Lanka",
+    },
 }
 
 
@@ -52,8 +75,35 @@ def load_rules(path, cli_rules=None):
         if any(not isinstance(value, str) or not value.strip() for value in additions):
             raise ValueError(f"Valores inválidos para {key}.")
         rules[key] = [normalize(value) for value in [*rules[key], *additions]]
-    if not isinstance(rules["exclude_adult"], bool):
-        raise ValueError("exclude_adult deve ser true ou false.")
+    for key in (
+        "exclude_adult",
+        "exclude_unmapped_non_latin",
+        "group_script_channels",
+        "group_unmapped_scripts",
+    ):
+        if not isinstance(rules[key], bool):
+            raise ValueError(f"{key} deve ser true ou false.")
+    if not isinstance(rules["language_character_groups"], dict) or any(
+        not isinstance(group, str) or not group.strip()
+        or not isinstance(characters, list)
+        or any(not isinstance(char, str) or len(char) != 1 for char in characters)
+        for group, characters in rules["language_character_groups"].items()
+    ):
+        raise ValueError("language_character_groups deve mapear grupos para listas de caracteres.")
+    rules["language_character_groups"] = {
+        group.strip(): [char.casefold() for char in characters]
+        for group, characters in rules["language_character_groups"].items()
+    }
+    if not isinstance(rules["script_country_groups"], dict) or any(
+        not isinstance(script, str) or not script.strip()
+        or not isinstance(country, str) or not country.strip()
+        for script, country in rules["script_country_groups"].items()
+    ):
+        raise ValueError("script_country_groups deve mapear scripts para países não vazios.")
+    rules["script_country_groups"] = {
+        script.strip().upper(): country.strip()
+        for script, country in rules["script_country_groups"].items()
+    }
     return rules
 
 
@@ -69,13 +119,76 @@ def countries_for(entry, attrs):
     }
 
 
+def entry_labels(entry, attrs):
+    labels = [entry[0].partition(",")[2]]
+    labels.extend(
+        attrs[key]
+        for key in ("tvg-name", "tvg-id", "group-title", "tvg-category", "category", "tvg-language")
+        if attrs.get(key)
+    )
+    labels.extend(line.strip().partition(":")[2] for line in entry if line.strip().startswith("#EXTGRP:"))
+    return labels
+
+
+def scripts_in_entry(entry, attrs):
+    scripts = set()
+    for char in " ".join(entry_labels(entry, attrs)):
+        if not char.isalpha():
+            continue
+        name = unicodedata.name(char, "")
+        if name.startswith(("CJK UNIFIED IDEOGRAPH", "CJK COMPATIBILITY IDEOGRAPH")):
+            scripts.add("HAN")
+        elif "HIRAGANA" in name:
+            scripts.add("HIRAGANA")
+        elif "KATAKANA" in name:
+            scripts.add("KATAKANA")
+        elif "HANGUL" in name:
+            scripts.add("HANGUL")
+        elif "THAI" in name:
+            scripts.add("THAI")
+        elif "LATIN" not in name:
+            scripts.add(name.partition(" ")[0] or "OTHER")
+    return scripts
+
+
+def script_country(entry, attrs, rules):
+    scripts = scripts_in_entry(entry, attrs)
+    mapping = rules["script_country_groups"]
+    for script in ("HIRAGANA", "KATAKANA", "HANGUL", "HAN", "THAI"):
+        if script in scripts and script in mapping:
+            return mapping[script]
+    for script in sorted(scripts):
+        if script in mapping:
+            return mapping[script]
+    return None
+
+
+def generic_script_group(entry, attrs, rules):
+    if not rules["group_unmapped_scripts"]:
+        return None
+    scripts = scripts_in_entry(entry, attrs) - rules["script_country_groups"].keys()
+    return min(scripts).replace("_", " ").title() if scripts else None
+
+
+def language_character_group(entry, attrs, rules):
+    searchable = " ".join(entry_labels(entry, attrs)).casefold()
+    for group, characters in rules["language_character_groups"].items():
+        if any(char in searchable for char in characters):
+            return group
+    return None
+
+
 def excluded(entry, rules):
     if rules["exclude_adult"] and is_adult_entry(entry):
         return True
     attrs = entry_attributes(entry)
-    labels = [entry[0].partition(",")[2], *attrs.values()]
-    labels.extend(line.strip().partition(":")[2] for line in entry if line.strip().startswith("#EXTGRP:"))
+    labels = entry_labels(entry, attrs)
     searchable = normalize(" ".join(labels))
+    scripts = scripts_in_entry(entry, attrs)
+    country_group = script_country(entry, attrs, rules)
+    unmapped_scripts = scripts - rules["script_country_groups"].keys()
+    if rules["exclude_unmapped_non_latin"] and unmapped_scripts:
+        return True
 
     whitelist_terms = rules["whitelist_terms"]
     if whitelist_terms and not any(term in searchable for term in whitelist_terms):
@@ -84,6 +197,8 @@ def excluded(entry, rules):
         return True
 
     countries = countries_for(entry, attrs)
+    if country_group:
+        countries.add(normalize(country_group))
     if rules["whitelist_countries"] and not countries.intersection(rules["whitelist_countries"]):
         return True
     return bool(countries.intersection(rules["blacklist_countries"]))
@@ -93,7 +208,17 @@ def filter_playlist(content, rules):
     text = content.decode("utf-8-sig") if isinstance(content, bytes) else content
     if not text.lstrip("\ufeff").splitlines() or not text.lstrip("\ufeff").splitlines()[0].strip().startswith("#EXTM3U"):
         raise ValueError("Arquivo sem cabeçalho #EXTM3U.")
-    entries = [entry for entry in parse_entries(text) if not excluded(entry, rules)]
+    entries = []
+    for entry in parse_entries(text):
+        if excluded(entry, rules):
+            continue
+        attrs = entry_attributes(entry)
+        country_group = script_country(entry, attrs, rules)
+        language_group = language_character_group(entry, attrs, rules)
+        script_group = country_group or language_group or generic_script_group(entry, attrs, rules)
+        if script_group and rules["group_script_channels"]:
+            entry = set_group_title(entry, script_group)
+        entries.append(entry)
     return render_playlist(entries).encode("utf-8")
 
 
@@ -141,7 +266,8 @@ class FilterHandler(BaseHTTPRequestHandler):
             self.send_error(404, "Arquivo não encontrado")
             return
         try:
-            body = self.server.filtered_playlist()
+            server = cast(FilterServer, self.server)
+            body = server.filtered_playlist()
         except FileNotFoundError:
             self.send_error(404, "Playlist de entrada não encontrada")
             return
@@ -198,6 +324,11 @@ def main():
     parser.add_argument("--whitelist-country", "--include-country", dest="whitelist_countries", action="append", default=[])
     parser.add_argument("--blacklist-country", "--exclude-country", dest="blacklist_countries", action="append", default=[])
     parser.add_argument("--include-adult", action="store_true", help="Não aplica a exclusão automática de canais adultos.")
+    non_latin = parser.add_mutually_exclusive_group()
+    non_latin.add_argument("--include-unmapped-non-latin", action="store_true",
+                           help="Mantém alfabetos sem país mapeado e agrupa pelo script.")
+    non_latin.add_argument("--exclude-unmapped-non-latin", action="store_true",
+                           help="Exclui alfabetos sem país mapeado.")
     parser.add_argument("--host", type=ipv4_address, default="0.0.0.0")
     parser.add_argument("--port", type=positive_int, default=8082)
     args = parser.parse_args()
@@ -212,6 +343,10 @@ def main():
         rules = load_rules(args.filters, cli_rules)
         if args.include_adult:
             rules["exclude_adult"] = False
+        if args.include_unmapped_non_latin:
+            rules["exclude_unmapped_non_latin"] = False
+        if args.exclude_unmapped_non_latin:
+            rules["exclude_unmapped_non_latin"] = True
         preview = filter_playlist(args.input.read_bytes(), rules)
         write_atomic(args.output, preview)
         server = FilterServer((args.host, args.port), args.input, args.output, rules)

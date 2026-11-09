@@ -3,5 +3,27 @@
   "blacklist_terms": [],
   "whitelist_countries": [],
   "blacklist_countries": [],
-  "exclude_adult": true
+  "exclude_adult": true,
+  "exclude_unmapped_non_latin": false,
+  "group_script_channels": true,
+  "group_unmapped_scripts": true,
+  "language_character_groups": {
+    "spanish_presumed": ["ñ", "¿", "¡"],
+    "islandic_presumed": ["þ", "ð", "æ"]
+  },
+  "script_country_groups": {
+    "HAN": "China",
+    "HIRAGANA": "Japan",
+    "KATAKANA": "Japan",
+    "HANGUL": "South Korea",
+    "THAI": "Thailand",
+    "ARMENIAN": "Armenia",
+    "GEORGIAN": "Georgia",
+    "GREEK": "Greece",
+    "HEBREW": "Israel",
+    "KHMER": "Cambodia",
+    "LAO": "Laos",
+    "MYANMAR": "Myanmar",
+    "SINHALA": "Sri Lanka"
+  }
 }
