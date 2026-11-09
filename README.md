@@ -26,6 +26,14 @@ python createIPTFList.py --query "iptv m3u in:readme" --max-repositories 50 --ma
 
 Também é possível configurar `--all-found`, `--working`, `--request-timeout`, `--stream-timeout` e `--check-delay`. A busca é limitada pelos resultados da API, pela consulta e pelos limites configurados; não enumera todo o GitHub. Configure `GITHUB_TOKEN` no ambiente para reduzir a chance de atingir o limite da API. Não coloque o token no código nem no Git.
 
+Por padrão, a execução retoma (`--resume`): preserva `allFound.m3u`, evita duplicar URLs já coletadas e pula na validação os canais já presentes em `working.m3u`. Para apagar os dois arquivos e começar do zero, use `--no-resume`:
+
+```bash
+python createIPTFList.py --no-resume
+```
+
+A retomada não guarda o cursor da busca GitHub: ela recomeça a consultar os repositórios desde o início, mas conserva os M3Us e ignora canais já coletados. Canais que falharam antes e não estão em `working.m3u` são testados novamente.
+
 A checagem confirma resposta HTTP e, para HLS, tenta carregar o primeiro segmento. Ela não decodifica o vídeo e não garante compatibilidade com a TV. A validação é sequencial e insere uma pequena pausa entre canais.
 
 ## Servir `working.m3u`

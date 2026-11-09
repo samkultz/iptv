@@ -133,6 +133,76 @@ class PlaylistTests(unittest.TestCase):
             self.assertNotIn("Miami TV", all_found.read_text(encoding="utf-8"))
             self.assertEqual(working.read_text(encoding="utf-8").count("#EXTINF:"), 2)
 
+    def test_resume_keeps_existing_channels_and_checks_only_unfinished(self):
+        existing = "#EXTM3U\n#EXTINF:-1,First\nhttps://one.example/live\n"
+        source = (
+            existing
+            + "#EXTINF:-1,Second\nhttps://two.example/live\n"
+        )
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            all_found = root / "allFound.m3u"
+            working = root / "working.m3u"
+            all_found.write_text(existing, encoding="utf-8")
+            working.write_text(existing, encoding="utf-8")
+            with (
+                patch.object(
+                    collector,
+                    "search_repositories",
+                    return_value=iter([{"full_name": "owner/repo", "default_branch": "main"}]),
+                ),
+                patch.object(collector, "repository_playlists", return_value=iter(["channels.m3u"])),
+                patch.object(
+                    collector,
+                    "download_playlist",
+                    return_value=("https://raw.example/channels.m3u", source.encode()),
+                ),
+                patch.object(collector, "check_channel", return_value="responded") as check,
+            ):
+                collector.discover(["query"], all_found, 2, 5, 1, resume=True)
+                count = collector.validate_all(all_found, working, 1, 0, resume=True)
+
+            self.assertEqual(all_found.read_text(encoding="utf-8").count("#EXTINF:"), 2)
+            self.assertEqual(working.read_text(encoding="utf-8").count("#EXTINF:"), 2)
+            check.assert_called_once()
+            self.assertIn("two.example", check.call_args.args[0])
+            self.assertEqual(count, 2)
+
+    def test_restart_clears_previous_discovery(self):
+        with TemporaryDirectory() as directory:
+            all_found = Path(directory) / "allFound.m3u"
+            all_found.write_text(
+                "#EXTM3U\n#EXTINF:-1,Old\nhttps://old.example/live\n",
+                encoding="utf-8",
+            )
+            with patch.object(collector, "search_repositories", return_value=iter(())):
+                count = collector.discover(["query"], all_found, 1, 1, 1, resume=False)
+            self.assertEqual(count, 0)
+            self.assertEqual(all_found.read_text(encoding="utf-8"), "#EXTM3U\n")
+
+    def test_no_resume_clears_both_files_before_search(self):
+        with TemporaryDirectory() as directory:
+            all_found = Path(directory) / "allFound.m3u"
+            working = Path(directory) / "working.m3u"
+            old = "#EXTM3U\n#EXTINF:-1,Old\nhttps://old.example/live\n"
+            all_found.write_text(old, encoding="utf-8")
+            working.write_text(old, encoding="utf-8")
+            args = [
+                "createIPTFList.py",
+                "--all-found", str(all_found),
+                "--working", str(working),
+                "--no-resume",
+            ]
+            with patch("sys.argv", args), patch.object(
+                collector,
+                "discover",
+                side_effect=collector.GitHubAPIError("offline"),
+            ):
+                with self.assertRaises(SystemExit):
+                    collector.main()
+            self.assertEqual(all_found.read_text(encoding="utf-8"), "#EXTM3U\n")
+            self.assertEqual(working.read_text(encoding="utf-8"), "#EXTM3U\n")
+
 
 if __name__ == "__main__":
     unittest.main()

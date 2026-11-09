@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -132,10 +133,41 @@ def _append_entries(path, entries):
         output.flush()
 
 
-def discover(queries, all_found, max_repositories, max_playlists, timeout, token=None):
+def _channel_key(entry):
+    _, url, headers = channel_request(entry)
+    return (url, tuple(sorted(headers.items()))) if url else None
+
+
+def _load_entries(path):
+    content = filter_porn_entries(path.read_bytes())
+    text = content.decode("utf-8-sig")
+    if not text.lstrip().startswith("#EXTM3U"):
+        raise ValueError(f"Playlist inválida, sem cabeçalho #EXTM3U: {path}")
+    return parse_entries(content)
+
+
+def _write_entries(path, entries):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, prefix=f".{path.name}.", delete=False) as target:
+            temporary = Path(target.name)
+            target.write(render_playlist(entries).encode("utf-8"))
+        temporary.replace(path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def discover(queries, all_found, max_repositories, max_playlists, timeout, token=None, resume=False):
     all_found.parent.mkdir(parents=True, exist_ok=True)
-    all_found.write_text("#EXTM3U\n", encoding="utf-8")
-    seen_channels = set()
+    if resume and all_found.is_file():
+        existing_entries = _load_entries(all_found)
+        seen_channels = {key for entry in existing_entries if (key := _channel_key(entry))}
+        print(f"Retomando allFound com {len(seen_channels)} canais existentes.", flush=True)
+    else:
+        all_found.write_text("#EXTM3U\n", encoding="utf-8")
+        seen_channels = set()
     accepted_playlists = 0
     processed_playlists = 0
     checked_repositories = 0
@@ -154,9 +186,8 @@ def discover(queries, all_found, max_repositories, max_playlists, timeout, token
                     source_url, content = download_playlist(repository, path, timeout, token)
                     entries = []
                     for entry in parse_entries(content):
-                        _, url, headers = channel_request(entry)
-                        key = (url, tuple(sorted(headers.items())))
-                        if url and key not in seen_channels:
+                        key = _channel_key(entry)
+                        if key and key not in seen_channels:
                             seen_channels.add(key)
                             entries.append(entry)
                     if entries:
@@ -186,11 +217,22 @@ def discover(queries, all_found, max_repositories, max_playlists, timeout, token
     return len(seen_channels)
 
 
-def validate_all(all_found, working, timeout, delay):
-    entries = parse_entries(filter_porn_entries(all_found.read_bytes()))
-    working.parent.mkdir(parents=True, exist_ok=True)
-    working.write_text("#EXTM3U\n", encoding="utf-8")
-    seen, working_count = set(), 0
+def validate_all(all_found, working, timeout, delay, resume=False):
+    entries = _load_entries(all_found)
+    working_entries = []
+    seen = set()
+    if resume and working.is_file():
+        source_by_key = {
+            key: entry for entry in entries if (key := _channel_key(entry))
+        }
+        for entry in _load_entries(working):
+            key = _channel_key(entry)
+            if key and key in source_by_key and key not in seen:
+                seen.add(key)
+                working_entries.append(source_by_key[key])
+        print(f"Retomando working com {len(working_entries)} canais já validados.", flush=True)
+    _write_entries(working, working_entries)
+    working_count = len(working_entries)
     total = len(entries)
     print(f"Iniciando validação de {total} canais...", flush=True)
     for index, entry in enumerate(entries, start=1):
@@ -254,10 +296,20 @@ def main():
     parser.add_argument("--request-timeout", type=positive_float, default=15)
     parser.add_argument("--stream-timeout", type=positive_float, default=4)
     parser.add_argument("--check-delay", type=nonnegative_float, default=0.1)
+    parser.add_argument(
+        "--resume",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Preserva M3Us existentes e pula canais já concluídos (padrão; use --no-resume para recomeçar).",
+    )
     args = parser.parse_args()
 
     if args.all_found.resolve() == args.working.resolve():
         parser.error("--all-found e --working precisam ser arquivos diferentes.")
+    if not args.resume:
+        for path in (args.all_found, args.working):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("#EXTM3U\n", encoding="utf-8")
     token = os.environ.get("GITHUB_TOKEN")
     queries = args.query or list(DEFAULT_QUERIES)
     try:
@@ -268,10 +320,14 @@ def main():
             args.max_playlists,
             args.request_timeout,
             token,
+            resume=args.resume,
         )
-        validate_all(args.all_found, args.working, args.stream_timeout, args.check_delay)
+        validate_all(args.all_found, args.working, args.stream_timeout, args.check_delay, resume=args.resume)
     except (GitHubAPIError, OSError, ValueError) as error:
         parser.exit(1, f"Pipeline interrompida: {error}\n")
+    except KeyboardInterrupt:
+        print("Interrompido; resultados parciais preservados. Rode novamente com --resume.", file=sys.stderr)
+        raise SystemExit(130) from None
 
 
 if __name__ == "__main__":
