@@ -18,18 +18,18 @@ from urllib.request import Request, urlopen
 
 DEFAULT_PLAYLIST = Path(__file__).resolve().parent / "output" / "working.m3u"
 DEFAULT_OUTPUT = DEFAULT_PLAYLIST.with_name("runprogram.m3u")
-BLOCKED_ADULT_DOMAINS = ("kaamdesi.com",)
-PORN_LABEL = re.compile(
-    r"porn|xxx|erotic|erotik|erotico|playboy|hustler|brazzers|penthouse|"
-    r"dorcel|red\W*light|private\W*tv|sex\W*prive|sex\W*treme|"
-    r"sexy?\W*hot|\badult(?:s|o|os)?\b(?!\W*swim\b)"
-)
 CHANNEL_ATTRIBUTE = re.compile(
     r'''\b(?:tvg-name|tvg-id|group-title|tvg-category|category)\s*=\s*(["'])(.*?)\1''',
     re.IGNORECASE,
 )
 
 
+BLOCKED_ADULT_DOMAINS = ("kaamdesi.com",)
+PORN_LABEL = re.compile(
+    r"porn|xxx|erotic|erotik|erotico|playboy|hustler|brazzers|penthouse|"
+    r"dorcel|red\W*light|private\W*tv|sex\W*prive|sex\W*treme|"
+    r"sexy?\W*hot|\badult(?:s|o|os)?\b(?!\W*swim\b)"
+)
 def _is_porn_entry(entry):
     if any(domain in line.casefold() for domain in BLOCKED_ADULT_DOMAINS for line in entry):
         return True
