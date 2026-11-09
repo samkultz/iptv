@@ -1,7 +1,12 @@
+from contextlib import redirect_stdout
+from io import StringIO
+import threading
+import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlsplit
 
 import createIPTFList as collector
 import iptv_playlist
@@ -39,7 +44,7 @@ class PlaylistTests(unittest.TestCase):
             ],
         ):
             result = iptv_playlist.check_channel("https://host.test/master.m3u8")
-        self.assertIn("primeiro segmento", result)
+        self.assertIn("first segment", result)
 
     def test_filters_by_term_and_country(self):
         rules = {
@@ -167,6 +172,138 @@ class PlaylistTests(unittest.TestCase):
             check.assert_called_once()
             self.assertIn("two.example", check.call_args.args[0])
             self.assertEqual(count, 2)
+
+    def test_validation_reports_progress_percent_and_eta(self):
+        self.assertEqual(collector.format_percent(2.9), "2,9")
+        self.assertEqual(collector.format_percent(10), "10")
+        self.assertEqual(collector.format_percent(11), "11")
+        self.assertEqual(collector.format_percent(100), "100")
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "allFound.m3u"
+            working = root / "working.m3u"
+            source.write_text(
+                "#EXTM3U\n#EXTINF:-1,One\nhttps://one.example/live\n"
+                "#EXTINF:-1,Two\nhttps://two.example/live\n",
+                encoding="utf-8",
+            )
+            output = StringIO()
+            with patch.object(collector, "check_channel", return_value="responded"), redirect_stdout(output):
+                collector.validate_all(source, working, 1, 0)
+            self.assertRegex(
+                output.getvalue(),
+                r"\[1/2 50% ETA: \d{2}:\d{2}:\d{2}\] \[WORKS\] One",
+            )
+            self.assertIn("[2/2 100% ETA: 00:00:00] [WORKS] Two", output.getvalue())
+
+    def test_validation_is_parallel_and_respects_worker_limit(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "allFound.m3u"
+            working = root / "working.m3u"
+            entries = "#EXTM3U\n" + "".join(
+                f"#EXTINF:-1,Channel {index}\nhttps://channel{index}.example/live\n"
+                for index in range(6)
+            )
+            source.write_text(entries, encoding="utf-8")
+            lock = threading.Lock()
+            active = 0
+            maximum_active = 0
+
+            def check_channel(*args):
+                nonlocal active, maximum_active
+                with lock:
+                    active += 1
+                    maximum_active = max(maximum_active, active)
+                time.sleep(0.03)
+                with lock:
+                    active -= 1
+                return "responded"
+
+            with patch.object(collector, "check_channel", side_effect=check_channel), redirect_stdout(StringIO()):
+                count = collector.validate_all(source, working, 1, 0, workers=3)
+
+            self.assertEqual(count, 6)
+            self.assertGreaterEqual(maximum_active, 2)
+            self.assertLessEqual(maximum_active, 3)
+
+    def test_search_queries_run_in_parallel_and_deduplicate_repositories(self):
+        lock = threading.Lock()
+        active = 0
+        maximum_active = 0
+
+        def fake_api(path, timeout, token):
+            nonlocal active, maximum_active
+            query = parse_qs(urlsplit(path).query)["q"][0]
+            with lock:
+                active += 1
+                maximum_active = max(maximum_active, active)
+            time.sleep(0.03)
+            with lock:
+                active -= 1
+            return {"items": [
+                {"full_name": "shared/repo"},
+                {"full_name": f"{query}/repo"},
+            ]}
+
+        with patch.object(collector, "_api_json", side_effect=fake_api):
+            repositories = list(
+                collector.search_repositories(["first", "second"], 5, 1, workers=2)
+            )
+        self.assertGreaterEqual(maximum_active, 2)
+        self.assertLessEqual(maximum_active, 2)
+        self.assertEqual({repo["full_name"] for repo in repositories}, {
+            "shared/repo", "first/repo", "second/repo",
+        })
+
+    def test_repository_trees_and_playlist_downloads_run_in_parallel(self):
+        repositories = [
+            {"full_name": f"owner{index}/repo", "default_branch": "main"}
+            for index in range(3)
+        ]
+        lock = threading.Lock()
+        active_trees = 0
+        max_trees = 0
+        active_downloads = 0
+        max_downloads = 0
+
+        def track_tree(repository, *args):
+            nonlocal active_trees, max_trees
+            with lock:
+                active_trees += 1
+                max_trees = max(max_trees, active_trees)
+            time.sleep(0.03)
+            with lock:
+                active_trees -= 1
+            return iter(["channels.m3u"])
+
+        def track_download(repository, path, *args):
+            nonlocal active_downloads, max_downloads
+            with lock:
+                active_downloads += 1
+                max_downloads = max(max_downloads, active_downloads)
+            time.sleep(0.03)
+            with lock:
+                active_downloads -= 1
+            channel = repository["full_name"]
+            content = f"#EXTM3U\n#EXTINF:-1,{channel}\nhttps://{channel}.example/live\n"
+            return f"https://raw.example/{channel}.m3u", content.encode()
+
+        with TemporaryDirectory() as directory:
+            all_found = Path(directory) / "allFound.m3u"
+            with (
+                patch.object(collector, "search_repositories", return_value=iter(repositories)),
+                patch.object(collector, "repository_playlists", side_effect=track_tree),
+                patch.object(collector, "download_playlist", side_effect=track_download),
+                redirect_stdout(StringIO()),
+            ):
+                count = collector.discover(["query"], all_found, 3, 10, 1, workers=3)
+
+        self.assertEqual(count, 3)
+        self.assertGreaterEqual(max_trees, 2)
+        self.assertLessEqual(max_trees, 3)
+        self.assertGreaterEqual(max_downloads, 2)
+        self.assertLessEqual(max_downloads, 3)
 
     def test_restart_clears_previous_discovery(self):
         with TemporaryDirectory() as directory:

@@ -16,12 +16,15 @@ Execute:
 python createIPTFList.py
 ```
 
-O coletor procura repositórios cujo README corresponda às consultas padrão, examina arquivos `.m3u` na branch principal e grava canais aceitos em `output/allFound.m3u` à medida que os encontra. Ao concluir a busca, testa os canais em sequência e grava em `output/working.m3u` somente os que responderem. Entradas adultas reconhecidas são descartadas antes de entrar nas listas.
+O coletor procura repositórios cujo README corresponda às consultas padrão, examina arquivos `.m3u` na branch principal e grava canais aceitos em `output/allFound.m3u` à medida que os encontra. Ao concluir a busca, testa os canais e grava em `output/working.m3u` somente os que responderem. Entradas adultas reconhecidas são descartadas antes de entrar nas listas.
+
+As consultas independentes, árvores dos repositórios, downloads M3U e verificações de stream usam workers concorrentes. O padrão é 4 workers e o limite aceito é de 1 a 4; o espaçamento global entre o início de verificações é controlado por `--check-delay`. A paginação dentro de cada consulta do GitHub continua sequencial.
 
 Por padrão, a busca examina até 30 repositórios e 100 arquivos M3U. Personalize a consulta e os limites:
 
 ```bash
 python createIPTFList.py --query "iptv m3u in:readme" --max-repositories 50 --max-playlists 200
+python createIPTFList.py --workers 2
 ```
 
 Também é possível configurar `--all-found`, `--working`, `--request-timeout`, `--stream-timeout` e `--check-delay`. A busca é limitada pelos resultados da API, pela consulta e pelos limites configurados; não enumera todo o GitHub. Configure `GITHUB_TOKEN` no ambiente para reduzir a chance de atingir o limite da API. Não coloque o token no código nem no Git.

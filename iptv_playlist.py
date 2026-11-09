@@ -157,35 +157,35 @@ def fetch_sample(url, headers, timeout, byte_range="bytes=0-65535"):
     except TimeoutError:
         raise ValueError("timeout") from None
     except HTTPException as error:
-        raise ValueError(f"resposta HTTP inválida: {error}") from None
+        raise ValueError(f"invalid HTTP response: {error}") from None
 
 
 def check_channel(url, headers=None, timeout=4):
     headers = headers or {"User-Agent": "IPTV-HealthCheck/1.0", "Accept-Encoding": "identity"}
     parsed = urlsplit(url or "")
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ValueError("URL não HTTP/HTTPS ou ausente")
+        raise ValueError("missing or unsupported URL scheme; expected HTTP or HTTPS")
     final_url, body = fetch_sample(url, headers, timeout)
     if not body:
-        raise ValueError("resposta vazia")
+        raise ValueError("empty response")
     if body.lstrip().lower().startswith((b"<html", b"<!doctype html")):
-        raise ValueError("servidor respondeu HTML, não um stream")
+        raise ValueError("server returned HTML instead of a stream")
     manifest_prefix = b"#EXTM3U"
     if not body.lstrip(b"\xef\xbb\xbf \t\r\n").startswith(manifest_prefix):
         return "respondeu com dados (formato não confirmado)"
     for _ in range(3):
         if not body.lstrip(b"\xef\xbb\xbf \t\r\n").startswith(manifest_prefix):
-            return "HLS e primeiro segmento responderam"
+            return "HLS playlist and first segment responded"
         lines = body.decode("utf-8-sig", errors="replace").splitlines()
         next_uri = next((line.strip() for line in lines if line.strip() and not line.startswith("#")), None)
         if not next_uri:
-            raise ValueError("playlist HLS sem segmento")
+            raise ValueError("HLS playlist has no segment")
         final_url, body = fetch_sample(urljoin(final_url, next_uri), headers, timeout)
         if not body:
-            raise ValueError("primeiro segmento HLS vazio")
+            raise ValueError("first HLS segment is empty")
         if body.lstrip().lower().startswith((b"<html", b"<!doctype html")):
-            raise ValueError("HLS apontou para uma resposta HTML")
-    raise ValueError("playlist HLS aninhada além do limite")
+            raise ValueError("HLS playlist points to an HTML response")
+    raise ValueError("nested HLS playlists exceed the maximum depth")
 
 
 def render_playlist(entries, header="#EXTM3U\n"):
