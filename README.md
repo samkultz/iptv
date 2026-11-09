@@ -1,57 +1,71 @@
 # Ferramentas IPTV
 
-Pequenos utilitários Python para servir playlists M3U, verificar respostas de streams e preparar vídeos locais para reprodução em TVs. Os scripts são independentes; não há um scanner de canais neste repositório.
+Pipeline para descobrir playlists M3U em repositórios públicos do GitHub, juntar os canais, testar os streams e servir uma lista menor na rede local.
 
 ## Requisitos
 
-- Python 3.
-- `ffmpeg` e `ffprobe` para `iferror.py` e `runprogram_stream.py`.
-- VLC para `runprogram_stream.py`; o script usa recursos do macOS/VideoToolbox.
-- `runprogram.py` usa apenas a biblioteca padrão do Python.
-- `runprogram_filtered.py` também importa `stream_tags.py` e espera um `filters.json`. Esses arquivos não estão incluídos no checkout atual, então esse script não funciona sem eles.
+- Python 3.10 ou superior; a pipeline usa somente a biblioteca padrão.
+- A busca usa a API REST de repositórios do GitHub. `GITHUB_TOKEN` é opcional, mas aumenta os limites de uso da API.
+- `ffmpeg`, `ffprobe` e VLC são necessários apenas para `iferror.py` e `runprogram_stream.py`.
 
-## Verificar canais
+## Pipeline
 
-`runprogram.py` testa um lote de URLs HTTP/HTTPS da playlist. Para HLS, tenta carregar o primeiro segmento. O teste não decodifica o stream e não garante compatibilidade com a TV; uma resposta positiva só confirma que o endpoint e, no caso de HLS, o primeiro segmento responderam. O script não remove canais com falha.
+Execute:
 
 ```bash
-python runprogram.py --check-streams --playlist output/minha-lista.m3u
+python createIPTFList.py
 ```
 
-A execução verifica até 25 URLs únicas. Para continuar em lotes, avance o offset:
+O coletor procura repositórios cujo README corresponda às consultas padrão, examina arquivos `.m3u` na branch principal e grava canais aceitos em `output/allFound.m3u` à medida que os encontra. Ao concluir a busca, testa os canais em sequência e grava em `output/working.m3u` somente os que responderem. Entradas adultas reconhecidas são descartadas antes de entrar nas listas.
+
+Por padrão, a busca examina até 30 repositórios e 100 arquivos M3U. Personalize a consulta e os limites:
 
 ```bash
-python runprogram.py --check-streams --playlist output/minha-lista.m3u --check-offset 25 --check-limit 25
+python createIPTFList.py --query "iptv m3u in:readme" --max-repositories 50 --max-playlists 200
 ```
 
-`--check-limit` aceita de 1 a 100 URLs e `--check-timeout` de 1 a 15 segundos (padrão: 4). O comando termina com código 1 se houver falhas no lote.
+Também é possível configurar `--all-found`, `--working`, `--request-timeout`, `--stream-timeout` e `--check-delay`. A busca é limitada pelos resultados da API, pela consulta e pelos limites configurados; não enumera todo o GitHub. Configure `GITHUB_TOKEN` no ambiente para reduzir a chance de atingir o limite da API. Não coloque o token no código nem no Git.
 
-## Servir uma playlist
+A checagem confirma resposta HTTP e, para HLS, tenta carregar o primeiro segmento. Ela não decodifica o vídeo e não garante compatibilidade com a TV. A validação é sequencial e insere uma pequena pausa entre canais.
+
+## Servir `working.m3u`
+
+Depois da pipeline:
 
 ```bash
-python runprogram.py --playlist output/minha-lista.m3u
+python runprogram.py
 ```
 
-Por padrão, o servidor escuta em todas as interfaces e usa a porta 8080. Ele publica `/working.m3u` e tenta disponibilizar `/epg.xml` ao lado do arquivo M3U. As entradas adultas reconhecidas pelo filtro são omitidas ao servir e exportar a playlist. Use somente em uma rede confiável: o servidor não tem autenticação.
+O servidor publica `http://<IP-da-rede>:8080/working.m3u` e gera `output/runprogram.m3u`. Por padrão, também disponibiliza o EPG se houver um `output/epg.xml` ao lado da playlist. Use apenas em uma rede confiável: o servidor não tem autenticação.
 
-Opções úteis:
+O teste manual em lotes continua disponível:
 
 ```bash
-python runprogram.py --help
-python runprogram.py --playlist output/minha-lista.m3u --port 8081
-python runprogram.py --playlist output/minha-lista.m3u --output output/playlist-local.m3u
+python runprogram.py --check-streams --playlist output/allFound.m3u --check-limit 25
+python runprogram.py --check-streams --playlist output/allFound.m3u --check-offset 25 --check-limit 25
 ```
 
-O caminho padrão da playlist é `output/working.m3u`, mas esse arquivo não está presente no checkout atual. Informe `--playlist` apontando para uma M3U existente.
+## Filtrar sem EPG
 
-## Outros scripts
+`runprogram_filtered.py` lê `output/working.m3u`, usa as regras de `filters.json`, grava `output/filtered.m3u` e serve apenas `/filtered.m3u`, sem rota EPG.
 
-- `runprogram_filtered.py`: filtra canais por idioma, palavras-chave e metadados, e serve a playlist resultante. Requer `stream_tags.py` e `filters.json`, ausentes neste checkout.
-- `runprogram_stream.py [arquivo]`: prepara e transmite um vídeo local usando VLC. Sem argumento, usa um caminho de vídeo configurado no próprio script.
-- `iferror.py`: transmite um vídeo local ou, com `--transcode`, gera uma cópia otimizada para TV. O caminho de origem está configurado no próprio script.
+Edite `filters.json` para configurar `whitelist_terms`, `blacklist_terms`, `whitelist_countries`, `blacklist_countries` e `exclude_adult`. As opções de whitelist são inclusivas: se houver termos ou países permitidos, o canal precisa corresponder. Os países são lidos dos atributos `tvg-country`, `country`, `country-code` ou `tvg-country-code` da entrada M3U.
 
-Confira as opções disponíveis com `python runprogram_stream.py --help` e `python iferror.py --help`.
+Também é possível adicionar regras pela linha de comando:
 
-## Arquivos gerados
+```bash
+python runprogram_filtered.py --whitelist-country BR --whitelist-term news --blacklist-term shopping
+```
 
-As playlists e guias podem conter URLs privadas ou tokens. Evite publicá-los. Arquivos M3U e o guia EPG dentro de `output/` são ignorados pelo Git quando ainda não estão sendo rastreados.
+Consulte `python runprogram_filtered.py --help` para as opções de entrada, saída, host e porta.
+
+## Utilitários de vídeo
+
+- `runprogram_stream.py [arquivo]` prepara um vídeo local para TV e transmite pelo VLC como um canal local.
+- `iferror.py` transmite um vídeo local ou, com `--transcode`, cria uma cópia otimizada para TV.
+
+Esses dois scripts têm um caminho de vídeo padrão configurado no próprio código. Informe um arquivo ao primeiro ou altere `VIDEO` em `iferror.py` antes de executar.
+
+## Dados locais
+
+`output/allFound.m3u`, `output/working.m3u`, `output/filtered.m3u` e `output/epg.xml` são arquivos gerados. URLs de streams podem conter tokens privados; evite publicá-los. `.gitignore` evita adicionar novas playlists geradas, mas arquivos que já são rastreados pelo Git continuam rastreados.

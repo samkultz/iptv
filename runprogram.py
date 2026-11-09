@@ -7,161 +7,21 @@ import re
 import shutil
 import socket
 import tempfile
-import unicodedata
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from http.client import HTTPException
-from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qsl, urljoin, urlsplit
-from urllib.request import Request, urlopen
+from typing import cast
+from urllib.parse import urlsplit
+
+from iptv_playlist import channel_request, check_channel, filter_porn_entries, parse_entries
 
 
 DEFAULT_PLAYLIST = Path(__file__).resolve().parent / "output" / "working.m3u"
 DEFAULT_OUTPUT = DEFAULT_PLAYLIST.with_name("runprogram.m3u")
-CHANNEL_ATTRIBUTE = re.compile(
-    r'''\b(?:tvg-name|tvg-id|group-title|tvg-category|category)\s*=\s*(["'])(.*?)\1''',
-    re.IGNORECASE,
-)
-
-
-BLOCKED_ADULT_DOMAINS = ("kaamdesi.com",)
-PORN_LABEL = re.compile(
-    r"porn|xxx|erotic|erotik|erotico|playboy|hustler|brazzers|penthouse|"
-    r"dorcel|red\W*light|private\W*tv|sex\W*prive|sex\W*treme|"
-    r"sexy?\W*hot|\badult(?:s|o|os)?\b(?!\W*swim\b)"
-)
-def _is_porn_entry(entry):
-    if any(domain in line.casefold() for domain in BLOCKED_ADULT_DOMAINS for line in entry):
-        return True
-    metadata = entry[0].strip()
-    labels = [metadata.partition(",")[2]]
-    labels.extend(match.group(2) for match in CHANNEL_ATTRIBUTE.finditer(metadata))
-    searchable = " ".join(labels).casefold()
-    searchable = "".join(
-        character for character in unicodedata.normalize("NFKD", searchable)
-        if not unicodedata.combining(character)
-    )
-    return bool(PORN_LABEL.search(searchable))
-
-
-def filter_porn_entries(content):
-    """Remove adult channel entries without fetching or inspecting stream URLs."""
-    lines = content.decode("utf-8-sig").splitlines(keepends=True)
-    result, entry = [], []
-    for line in lines:
-        if line.strip().startswith("#EXTINF:"):
-            if entry and not _is_porn_entry(entry):
-                result.extend(entry)
-            entry = [line]
-        elif entry:
-            entry.append(line)
-        else:
-            result.append(line)
-    if entry and not _is_porn_entry(entry):
-        result.extend(entry)
-    return "".join(result).encode("utf-8")
-
-
-def _channel_entries(content):
-    lines = content.decode("utf-8-sig").splitlines()
-    entries, entry = [], []
-    for line in lines:
-        if line.strip().startswith("#EXTINF:"):
-            if entry:
-                entries.append(entry)
-            entry = [line]
-        elif entry:
-            entry.append(line)
-    if entry:
-        entries.append(entry)
-    return entries
-
-
-def _channel_request(entry):
-    name = " ".join(entry[0].partition(",")[2].split())[:100] or "Sem nome"
-    headers = {"User-Agent": "IPTV-HealthCheck/1.0", "Accept-Encoding": "identity"}
-    header_names = {
-        "http-user-agent": "User-Agent",
-        "user-agent": "User-Agent",
-        "http-referrer": "Referer",
-        "referer": "Referer",
-        "origin": "Origin",
-    }
-    url = None
-    options = ""
-    for line in entry[1:]:
-        value = line.strip()
-        if value.startswith("#EXTVLCOPT:"):
-            key, separator, option = value.partition(":")[2].partition("=")
-            header = header_names.get(key.casefold())
-            if separator and header:
-                headers[header] = option
-        elif value and not value.startswith("#"):
-            url, _, options = value.partition("|")
-            break
-    for key, value in parse_qsl(options.replace("|", "&"), keep_blank_values=True):
-        header = header_names.get(key.casefold())
-        if header:
-            headers[header] = value
-    return name, url, headers
-
-
-def _fetch_sample(url, headers, timeout, byte_range="bytes=0-65535"):
-    request_headers = dict(headers)
-    request_headers["Range"] = byte_range
-    request = Request(url, headers=request_headers)
-    try:
-        with urlopen(request, timeout=timeout) as response:
-            body = response.read(65536)
-            return response.geturl(), body
-    except HTTPError as error:
-        raise ValueError(f"HTTP {error.code}") from None
-    except URLError as error:
-        reason = getattr(error, "reason", error)
-        raise ValueError(str(reason)) from None
-    except TimeoutError:
-        raise ValueError("timeout") from None
-    except HTTPException as error:
-        raise ValueError(f"resposta HTTP inválida: {error}") from None
-
-
-def _check_channel(url, headers, timeout):
-    parsed = urlsplit(url or "")
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ValueError("URL não HTTP/HTTPS ou ausente")
-    final_url, body = _fetch_sample(url, headers, timeout)
-    if not body:
-        raise ValueError("resposta vazia")
-    if body.lstrip().lower().startswith((b"<html", b"<!doctype html")):
-        raise ValueError("servidor respondeu HTML, não um stream")
-    manifest_prefix = b"#EXTM3U"
-    if not body.lstrip(b"\xef\xbb\xbf \t\r\n").startswith(manifest_prefix):
-        return "respondeu com dados (formato não confirmado)"
-    for _ in range(3):
-        if not body.lstrip(b"\xef\xbb\xbf \t\r\n").startswith(manifest_prefix):
-            return "HLS e primeiro segmento responderam"
-        lines = body.decode("utf-8-sig", errors="replace").splitlines()
-        next_uri = None
-        for line in lines:
-            line = line.strip()
-            if line and not line.startswith("#"):
-                next_uri = line
-                break
-        if not next_uri:
-            raise ValueError("playlist HLS sem segmento")
-        final_url, body = _fetch_sample(urljoin(final_url, next_uri), headers, timeout)
-        if not body:
-            raise ValueError("primeiro segmento HLS vazio")
-        if body.lstrip().lower().startswith((b"<html", b"<!doctype html")):
-            raise ValueError("HLS apontou para uma resposta HTML")
-    raise ValueError("playlist HLS aninhada além do limite")
-
-
 def check_playlist(path, offset=0, limit=25, timeout=4):
     content = filter_porn_entries(path.read_bytes())
     channels, seen = [], set()
-    for entry in _channel_entries(content):
-        name, url, headers = _channel_request(entry)
+    for entry in parse_entries(content):
+        name, url, headers = channel_request(entry)
         key = (url, tuple(sorted(headers.items()))) if url else f"invalid:{len(channels)}"
         if key not in seen:
             seen.add(key)
@@ -171,7 +31,7 @@ def check_playlist(path, offset=0, limit=25, timeout=4):
     failed = 0
     for name, url, headers in selected:
         try:
-            result = _check_channel(url, headers, timeout)
+            result = check_channel(url, headers, timeout)
             print(f"[RESPONDE] {name}: {result}")
         except (OSError, ValueError) as error:
             failed += 1
@@ -252,6 +112,11 @@ class PlaylistServer(ThreadingHTTPServer):
 
 
 class PlaylistHandler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        if self.requestline.startswith("\x16\x03"):
+            return
+        super().log_message(format, *args)
+
     def do_GET(self):
         self.serve_file(send_body=True)
 
@@ -269,7 +134,8 @@ class PlaylistHandler(BaseHTTPRequestHandler):
         if path == "/working.m3u":
             try:
                 local_ip, local_port = self.connection.getsockname()[:2]
-                body = self.server.playlist_body(f"http://{local_ip}:{local_port}/epg.xml")
+                server = cast(PlaylistServer, self.server)
+                body = server.playlist_body(f"http://{local_ip}:{local_port}/epg.xml")
             except FileNotFoundError:
                 self.send_error(404, "Playlist ou arquivo de filtros ainda nao disponivel")
                 return
@@ -292,7 +158,8 @@ class PlaylistHandler(BaseHTTPRequestHandler):
                     pass
             return
         elif path == "/epg.xml":
-            file_path = self.server.playlist.with_name("epg.xml")
+            server = cast(PlaylistServer, self.server)
+            file_path = server.playlist.with_name("epg.xml")
             content_type = "application/xml; charset=utf-8"
         else:
             self.send_error(404, "Arquivo nao encontrado")
